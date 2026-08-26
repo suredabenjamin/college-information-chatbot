@@ -1,0 +1,116 @@
+import os
+import streamlit as st
+from google import genai
+
+# ---------------------------
+# Config
+# ---------------------------
+# Prefer an environment variable so the key isn't sitting in plain text in
+# the file. If GEMINI_API_KEY isn't set, falls back to the string below.
+API_KEY = os.environ.get("GEMINI_API_KEY", "PASTE_YOUR_API_KEY_HERE")
+MODEL = "gemini-2.5-flash"
+BEN_FILE = "tec document.txt"
+
+st.set_page_config(page_title="TEC Info Chatbot", page_icon="🎓")
+st.title("🎓 Thamirabharani Engineering College - Info Chatbot")
+
+# ---------------------------
+# Load knowledge base (ben)
+# ---------------------------
+@st.cache_data
+def load_ben(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+try:
+    ben = load_ben(BEN_FILE)
+except FileNotFoundError:
+    st.error(
+        f"Could not find '{BEN_FILE}'. Make sure it's in the same folder as this script."
+    )
+    st.stop()
+
+# ---------------------------
+# Build system prompt
+# ---------------------------
+SYSTEM_PROMPT = f"""
+You are Thamirabharani Engineering College information chatbot. Your job is to
+provide answers to the questions asked by students in a polite manner.
+If a question is out of the given information (ben), say you don't have that
+information. Only refer to the ben below and provide your response based on it.
+
+{ben}
+"""
+
+# ---------------------------
+# Helper: create a fresh chat session
+# ---------------------------
+def create_client_and_chat(history=None):
+    client = genai.Client(api_key=API_KEY)
+    chat = client.chats.create(
+        model=MODEL,
+        config={"system_instruction": SYSTEM_PROMPT},
+        history=history,
+    )
+    return client, chat
+
+# ---------------------------
+# Message history in session_state
+# ---------------------------
+if not API_KEY or API_KEY == "PASTE_YOUR_API_KEY_HERE":
+    st.error("No API key set. Set the GEMINI_API_KEY environment variable or edit API_KEY in the script.")
+    st.stop()
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# IMPORTANT: keep a strong reference to BOTH the client and the chat in
+# session_state. Some versions of the google-genai SDK let the underlying
+# HTTP client get garbage-collected (and closed) if only the chat object
+# is kept alive — that's what causes "Cannot send a request, as the client
+# has been closed." Storing client alongside chat prevents that.
+if "genai_client" not in st.session_state or "genai_chat" not in st.session_state:
+    client, chat = create_client_and_chat()
+    st.session_state.genai_client = client
+    st.session_state.genai_chat = chat
+
+# ---------------------------
+# Render past messages
+# ---------------------------
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# ---------------------------
+# Handle new input
+# ---------------------------
+user_input = st.chat_input("Ask a question about the college...")
+
+if user_input:
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            try:
+                response = st.session_state.genai_chat.send_message(user_input)
+                answer = response.text
+            except Exception:
+                # Recreate client+chat together and retry once, replaying
+                # prior turns so context isn't lost.
+                try:
+                    history = st.session_state.genai_chat.get_history()
+                except Exception:
+                    history = None
+                try:
+                    client, chat = create_client_and_chat(history=history)
+                    st.session_state.genai_client = client
+                    st.session_state.genai_chat = chat
+                    response = chat.send_message(user_input)
+                    answer = response.text
+                except Exception as e2:
+                    answer = f"Sorry, something went wrong: {e2}"
+            st.markdown(answer)
+
+    st.session_state.messages.append({"role": "assistant", "content": answer})
